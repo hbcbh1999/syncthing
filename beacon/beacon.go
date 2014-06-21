@@ -52,7 +52,7 @@ func (b *Beacon) Recv() ([]byte, net.Addr) {
 }
 
 func (b *Beacon) reader() {
-	var bs = make([]byte, 65536)
+	bs := make([]byte, 65536)
 	for {
 		n, addr, err := b.conn.ReadFrom(bs)
 		if err != nil {
@@ -62,8 +62,11 @@ func (b *Beacon) reader() {
 		if debug {
 			l.Debugf("recv %d bytes from %s", n, addr)
 		}
+
+		c := make([]byte, n)
+		copy(c, bs)
 		select {
-		case b.outbox <- recv{bs[:n], addr}:
+		case b.outbox <- recv{c, addr}:
 		default:
 			if debug {
 				l.Debugln("dropping message")
@@ -83,7 +86,7 @@ func (b *Beacon) writer() {
 
 		var dsts []net.IP
 		for _, addr := range addrs {
-			if iaddr, ok := addr.(*net.IPNet); ok && iaddr.IP.IsGlobalUnicast() {
+			if iaddr, ok := addr.(*net.IPNet); ok && iaddr.IP.IsGlobalUnicast() && iaddr.IP.To4() != nil {
 				baddr := bcast(iaddr)
 				dsts = append(dsts, baddr.IP)
 			}

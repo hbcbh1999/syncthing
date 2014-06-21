@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/calmh/syncthing/buffers"
 	"github.com/calmh/syncthing/cid"
 	"github.com/calmh/syncthing/config"
 	"github.com/calmh/syncthing/files"
@@ -98,6 +97,9 @@ func NewModel(indexDir string, cfg *config.Configuration, clientName, clientVers
 		sup:           suppressor{threshold: int64(cfg.Options.MaxChangeKbps)},
 	}
 
+	deadlockDetect(&m.rmut, 60*time.Second)
+	deadlockDetect(&m.smut, 60*time.Second)
+	deadlockDetect(&m.pmut, 60*time.Second)
 	go m.broadcastIndexLoop()
 	return m
 }
@@ -433,7 +435,7 @@ func (m *Model) Request(nodeID protocol.NodeID, repo, name string, offset int64,
 	}
 	defer fd.Close()
 
-	buf := buffers.Get(int(size))
+	buf := make([]byte, size)
 	_, err = fd.ReadAt(buf, offset)
 	if err != nil {
 		return nil, err
@@ -850,4 +852,42 @@ func (m *Model) State(repo string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func (m *Model) Override(repo string) {
+	fs := m.NeedFilesRepo(repo)
+
+	m.rmut.Lock()
+	r := m.repoFiles[repo]
+	for i := range fs {
+		f := &fs[i]
+		h := r.Get(cid.LocalID, f.Name)
+		if h.Name != f.Name {
+			// We are missing the file
+			f.Flags |= protocol.FlagDeleted
+			f.Blocks = nil
+		} else {
+			// We have the file, replace with our version
+			*f = h
+		}
+		f.Version = lamport.Default.Tick(f.Version)
+	}
+	m.rmut.Unlock()
+
+	r.Update(cid.LocalID, fs)
+}
+
+// Version returns the change version for the given repository. This is
+// guaranteed to increment if the contents of the local or global repository
+// has changed.
+func (m *Model) Version(repo string) uint64 {
+	var ver uint64
+
+	m.rmut.Lock()
+	for _, n := range m.repoNodes[repo] {
+		ver += m.repoFiles[repo].Changes(m.cm.Get(n))
+	}
+	m.rmut.Unlock()
+
+	return ver
 }

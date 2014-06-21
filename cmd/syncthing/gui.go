@@ -58,6 +58,8 @@ func startGUI(cfg config.GUIConfiguration, assetDir string, m *model.Model) erro
 	if cfg.UseTLS {
 		cert, err := loadCert(confDir, "https-")
 		if err != nil {
+			l.Infoln("Loading HTTPS certificate:", err)
+			l.Infoln("Creating new HTTPS certificate")
 			newCertificate(confDir, "https-")
 			cert, err = loadCert(confDir, "https-")
 		}
@@ -89,6 +91,7 @@ func startGUI(cfg config.GUIConfiguration, assetDir string, m *model.Model) erro
 	router.Get("/", getRoot)
 	router.Get("/rest/version", restGetVersion)
 	router.Get("/rest/model", restGetModel)
+	router.Get("/rest/model/version", restGetModelVersion)
 	router.Get("/rest/need", restGetNeed)
 	router.Get("/rest/connections", restGetConnections)
 	router.Get("/rest/config", restGetConfig)
@@ -96,6 +99,7 @@ func startGUI(cfg config.GUIConfiguration, assetDir string, m *model.Model) erro
 	router.Get("/rest/system", restGetSystem)
 	router.Get("/rest/errors", restGetErrors)
 	router.Get("/rest/discovery", restGetDiscovery)
+	router.Get("/rest/report", restGetReport)
 	router.Get("/qr/:text", getQR)
 
 	router.Post("/rest/config", restPostConfig)
@@ -105,6 +109,7 @@ func startGUI(cfg config.GUIConfiguration, assetDir string, m *model.Model) erro
 	router.Post("/rest/error", restPostError)
 	router.Post("/rest/error/clear", restClearErrors)
 	router.Post("/rest/discovery/hint", restPostDiscoveryHint)
+	router.Post("/rest/model/override", restPostOverride)
 
 	mr := martini.New()
 	mr.Use(csrfMiddleware)
@@ -140,6 +145,17 @@ func restGetVersion() string {
 	return Version
 }
 
+func restGetModelVersion(m *model.Model, w http.ResponseWriter, r *http.Request) {
+	var qs = r.URL.Query()
+	var repo = qs.Get("repo")
+	var res = make(map[string]interface{})
+
+	res["version"] = m.Version(repo)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
 func restGetModel(m *model.Model, w http.ResponseWriter, r *http.Request) {
 	var qs = r.URL.Query()
 	var repo = qs.Get("repo")
@@ -164,9 +180,16 @@ func restGetModel(m *model.Model, w http.ResponseWriter, r *http.Request) {
 	res["inSyncFiles"], res["inSyncBytes"] = globalFiles-needFiles, globalBytes-needBytes
 
 	res["state"] = m.State(repo)
+	res["version"] = m.Version(repo)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+func restPostOverride(m *model.Model, r *http.Request) {
+	var qs = r.URL.Query()
+	var repo = qs.Get("repo")
+	m.Override(repo)
 }
 
 func restGetNeed(m *model.Model, w http.ResponseWriter, r *http.Request) {
@@ -193,7 +216,7 @@ func restGetConfig(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(encCfg)
 }
 
-func restPostConfig(req *http.Request) {
+func restPostConfig(req *http.Request, m *model.Model) {
 	var newCfg config.Configuration
 	err := json.NewDecoder(req.Body).Decode(&newCfg)
 	if err != nil {
@@ -240,7 +263,21 @@ func restPostConfig(req *http.Request) {
 			}
 		}
 
-		if !reflect.DeepEqual(cfg.Options, newCfg.Options) {
+		if newCfg.Options.URAccepted > cfg.Options.URAccepted {
+			// UR was enabled
+			newCfg.Options.URAccepted = usageReportVersion
+			err := sendUsageReport(m)
+			if err != nil {
+				l.Infoln("Usage report:", err)
+			}
+			go usageReportingLoop(m)
+		} else if newCfg.Options.URAccepted < cfg.Options.URAccepted {
+			// UR was disabled
+			newCfg.Options.URAccepted = -1
+			stopUsageReporting()
+		}
+
+		if !reflect.DeepEqual(cfg.Options, newCfg.Options) || !reflect.DeepEqual(cfg.GUI, newCfg.GUI) {
 			configInSync = false
 		}
 
@@ -343,6 +380,10 @@ func restPostDiscoveryHint(r *http.Request) {
 
 func restGetDiscovery(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(discoverer.All())
+}
+
+func restGetReport(w http.ResponseWriter, m *model.Model) {
+	json.NewEncoder(w).Encode(reportData(m))
 }
 
 func getQR(w http.ResponseWriter, params martini.Params) {

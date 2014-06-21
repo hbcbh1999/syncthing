@@ -59,10 +59,11 @@ or certificate pinning combined with some out of band first
 verification. The reference implementation uses preshared certificate
 fingerprints (SHA-256) referred to as "Node IDs".
 
-There is no required order or synchronization among BEP messages - any
-message type may be sent at any time and the sender need not await a
-response to one message before sending another. Responses MUST however
-be sent in the same order as the requests are received.
+There is no required order or synchronization among BEP messages except
+as noted per message type - any message type may be sent at any time and
+the sender need not await a response to one message before sending
+another. Responses MUST however be sent in the same order as the
+requests are received.
 
 The underlying transport protocol MUST be TCP.
 
@@ -70,12 +71,13 @@ Messages
 --------
 
 Every message starts with one 32 bit word indicating the message
-version, type and ID.
+version, type and ID. The header is in network byte order, i.e. big
+endian.
 
      0                   1                   2                   3
      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |  Ver  |  Type |       Message ID      |        Reply To       |
+    |  Ver  |       Message ID      |      Type     |    Reserved   |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 For BEP v1 the Version field is set to zero. Future versions with
@@ -84,18 +86,18 @@ with an unknown version is a protocol error and MUST result in the
 connection being terminated. A client supporting multiple versions MAY
 retry with a different protocol version upon disconnection.
 
+The Message ID is set to a unique value for each transmitted request
+message. In response messages it is set to the Message ID of the
+corresponding request message. The uniqueness requirement implies that
+no more than 4096 messages may be outstanding at any given moment. The
+ordering requirement implies that a response to a given message ID also
+means that all preceding messages have been received, specifically those
+which do not otherwise demand a response. Hence their message ID:s may
+be reused.
+
 The Type field indicates the type of data following the message header
 and is one of the integers defined below. A message of an unknown type
 is a protocol error and MUST result in the connection being terminated.
-
-The Message ID is set to a unique value for each transmitted message. In
-request messages the Reply To is set to zero. In response messages it is
-set to the message ID of the corresponding request. The uniqueness
-requirement implies that no more than 4096 messages may be outstanding
-at any given moment. The ordering requirement implies that a response to
-a given message ID also means that all preceding messages have been
-received, specifically those which do not otherwise demand a response.
-Hence their message ID:s may be reused.
 
 All data following the message header MUST be in XDR (RFC 1014)
 encoding. All fields shorter than 32 bits and all variable length data
@@ -117,8 +119,9 @@ normalization form C.
 ### Cluster Config (Type = 0)
 
 This informational message provides information about the cluster
-configuration, as it pertains to the current connection. It is sent by
-both sides after connection establishment.
+configuration as it pertains to the current connection. A Cluster Config
+message MUST be the first message sent on a BEP connection. Additional
+Cluster Config messages MUST NOT be sent after the initial exchange.
 
 #### Graphical Representation
 
@@ -294,11 +297,12 @@ peers acting in a specific manner as a result of sent options.
 ### Index (Type = 1)
 
 The Index message defines the contents of the senders repository. An
-Index message MUST be sent by each node immediately upon connection. A
-node with no data to advertise MUST send an empty Index message (a file
-list of zero length). If the repository contents change from non-empty
-to empty, an empty Index message MUST be sent. There is no response to
-the Index message.
+Index message MUST be sent for each repository mentioned in the Cluster
+Config message. An Index message for a repository MUST be sent before
+any other message referring to that repository. A node with no data to
+advertise MUST send an empty Index message (a file list of zero length).
+If the repository contents change from non-empty to empty, an empty
+Index message MUST be sent. There is no response to the Index message.
 
 #### Graphical Representation
 

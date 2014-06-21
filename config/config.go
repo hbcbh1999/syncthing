@@ -14,10 +14,10 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"code.google.com/p/go.crypto/bcrypt"
 	"github.com/calmh/syncthing/logger"
-	"github.com/calmh/syncthing/protocol"
 	"github.com/calmh/syncthing/scanner"
 )
 
@@ -156,7 +156,10 @@ type OptionsConfiguration struct {
 	MaxChangeKbps      int      `xml:"maxChangeKbps" default:"10000"`
 	StartBrowser       bool     `xml:"startBrowser" default:"true"`
 	UPnPEnabled        bool     `xml:"upnpEnabled" default:"true"`
+	URAccepted         int      `xml:"urAccepted"` // Accepted usage reporting version; 0 for off (undecided), -1 for off (permanently)
 
+	Deprecated_UREnabled  bool   `xml:"urEnabled,omitempty" json:"-"`
+	Deprecated_URDeclined bool   `xml:"urDeclined,omitempty" json:"-"`
 	Deprecated_ReadOnly   bool   `xml:"readOnly,omitempty" json:"-"`
 	Deprecated_GUIEnabled bool   `xml:"guiEnabled,omitempty" json:"-"`
 	Deprecated_GUIAddress string `xml:"guiAddress,omitempty" json:"-"`
@@ -324,6 +327,12 @@ func Load(rd io.Reader, myID protocol.NodeID) (Configuration, error) {
 			seenRepos[repo.ID] = repo
 		}
 	}
+
+	if cfg.Options.Deprecated_URDeclined {
+		cfg.Options.URAccepted = -1
+	}
+	cfg.Options.Deprecated_URDeclined = false
+	cfg.Options.Deprecated_UREnabled = false
 
 	// Upgrade to v2 configuration if appropriate
 	if cfg.Version == 1 {

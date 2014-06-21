@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 
 var (
 	Version     = "unknown-dev"
+	BuildEnv    = "default"
 	BuildStamp  = "0"
 	BuildDate   time.Time
 	BuildHost   = "unknown"
@@ -50,7 +52,7 @@ func init() {
 	BuildDate = time.Unix(int64(stamp), 0)
 
 	date := BuildDate.UTC().Format("2006-01-02 15:04:05 MST")
-	LongVersion = fmt.Sprintf("syncthing %s (%s %s-%s) %s@%s %s", Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, BuildUser, BuildHost, date)
+	LongVersion = fmt.Sprintf("syncthing %s (%s %s-%s %s) %s@%s %s", Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, BuildEnv, BuildUser, BuildHost, date)
 
 	if os.Getenv("STTRACE") != "" {
 		logFlags = log.Ltime | log.Ldate | log.Lmicroseconds | log.Lshortfile
@@ -106,6 +108,10 @@ The following enviroment variables are interpreted by syncthing:
 
  STGUIASSETS   Directory to load GUI assets from. Overrides compiled in assets.`
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 func main() {
 	var reset bool
@@ -273,11 +279,28 @@ func main() {
 
 	m := model.NewModel(confDir, &cfg, "syncthing", Version)
 
-	for _, repo := range cfg.Repositories {
+nextRepo:
+	for i, repo := range cfg.Repositories {
 		if repo.Invalid != "" {
 			continue
 		}
+
 		repo.Directory = expandTilde(repo.Directory)
+
+		// Safety check. If the cached index contains files but the repository
+		// doesn't exist, we have a problem. We would assume that all files
+		// have been deleted which might not be the case, so abort instead.
+
+		id := fmt.Sprintf("%x", sha1.Sum([]byte(repo.Directory)))
+		idxFile := filepath.Join(confDir, id+".idx.gz")
+		if _, err := os.Stat(idxFile); err == nil {
+			if fi, err := os.Stat(repo.Directory); err != nil || !fi.IsDir() {
+				cfg.Repositories[i].Invalid = "repo directory missing"
+				continue nextRepo
+			}
+		}
+
+		ensureDir(repo.Directory, -1)
 		m.AddRepo(repo)
 	}
 
@@ -321,32 +344,32 @@ func main() {
 
 	l.Infoln("Populating repository index")
 	m.LoadIndexes(confDir)
-
-	for _, repo := range cfg.Repositories {
-		if repo.Invalid != "" {
-			continue
-		}
-
-		dir := expandTilde(repo.Directory)
-
-		// Safety check. If the cached index contains files but the repository
-		// doesn't exist, we have a problem. We would assume that all files
-		// have been deleted which might not be the case, so abort instead.
-
-		if files, _, _ := m.LocalSize(repo.ID); files > 0 {
-			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-				l.Warnf("Configured repository %q has index but directory %q is missing; not starting.", repo.ID, repo.Directory)
-				l.Fatalf("Ensure that directory is present or remove repository from configuration.")
-			}
-		}
-
-		// Ensure that repository directories exist for newly configured repositories.
-		ensureDir(dir, -1)
-	}
-
 	m.CleanRepos()
 	m.ScanRepos()
 	m.SaveIndexes(confDir)
+
+	// Remove all .idx* files that don't belong to an active repo.
+
+	validIndexes := make(map[string]bool)
+	for _, repo := range cfg.Repositories {
+		dir := expandTilde(repo.Directory)
+		id := fmt.Sprintf("%x", sha1.Sum([]byte(dir)))
+		validIndexes[id] = true
+	}
+
+	allIndexes, err := filepath.Glob(filepath.Join(confDir, "*.idx*"))
+	if err == nil {
+		for _, idx := range allIndexes {
+			bn := filepath.Base(idx)
+			fs := strings.Split(bn, ".")
+			if len(fs) > 1 {
+				if _, ok := validIndexes[fs[0]]; !ok {
+					l.Infoln("Removing old index", bn)
+					os.Remove(idx)
+				}
+			}
+		}
+	}
 
 	// UPnP
 
@@ -354,8 +377,7 @@ func main() {
 	if cfg.Options.UPnPEnabled {
 		// We seed the random number generator with the node ID to get a
 		// repeatable sequence of random external ports.
-		rand.Seed(certSeed(cert.Certificate[0]))
-		externalPort = setupUPnP()
+		externalPort = setupUPnP(rand.NewSource(certSeed(cert.Certificate[0])))
 	}
 
 	// Routine to connect out to configured nodes
@@ -393,6 +415,21 @@ func main() {
 		}
 	}
 
+	if cfg.Options.URAccepted > 0 && cfg.Options.URAccepted < usageReportVersion {
+		l.Infoln("Anonymous usage report has changed; revoking acceptance")
+		cfg.Options.URAccepted = 0
+	}
+	if cfg.Options.URAccepted >= usageReportVersion {
+		go usageReportingLoop(m)
+		go func() {
+			time.Sleep(10 * time.Minute)
+			err := sendUsageReport(m)
+			if err != nil {
+				l.Infoln("Usage report:", err)
+			}
+		}()
+	}
+
 	<-stop
 	l.Okln("Exiting")
 }
@@ -411,7 +448,7 @@ func waitForParentExit() {
 	l.Okln("Continuing")
 }
 
-func setupUPnP() int {
+func setupUPnP(r rand.Source) int {
 	var externalPort = 0
 	if len(cfg.Options.ListenAddress) == 1 {
 		_, portStr, err := net.SplitHostPort(cfg.Options.ListenAddress[0])
@@ -423,7 +460,7 @@ func setupUPnP() int {
 			igd, err := upnp.Discover()
 			if err == nil {
 				for i := 0; i < 10; i++ {
-					r := 1024 + rand.Intn(65535-1024)
+					r := 1024 + int(r.Int63()%(65535-1024))
 					err := igd.AddPortMapping(upnp.TCP, r, port, "syncthing", 0)
 					if err == nil {
 						externalPort = r
@@ -569,6 +606,7 @@ func listenConnect(myID protocol.NodeID, m *model.Model, tlsCfg *tls.Config) {
 
 	// Connect
 	go func() {
+		var delay time.Duration = 1 * time.Second
 		for {
 		nextNode:
 			for _, nodeCfg := range cfg.Nodes {
@@ -619,7 +657,11 @@ func listenConnect(myID protocol.NodeID, m *model.Model, tlsCfg *tls.Config) {
 				}
 			}
 
-			time.Sleep(time.Duration(cfg.Options.ReconnectIntervalS) * time.Second)
+			time.Sleep(delay)
+			delay *= 2
+			if maxD := time.Duration(cfg.Options.ReconnectIntervalS) * time.Second; delay > maxD {
+				delay = maxD
+			}
 		}
 	}()
 
